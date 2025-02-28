@@ -1,11 +1,11 @@
-# run under 3 V100-32GB GPUs
+# run under 4 V100-32GB GPUs
 
 import os
 
 import numpy as np
 
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'  # use mirror, only for chinese users
-os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2'  # use 3 GPUs
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'  # use 4 GPUs
 
 import json
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -41,7 +41,7 @@ def parse_args():
     parser.add_argument('--n_sampling', type=int, default=1, help="n for sampling")
     parser.add_argument("--k", type=int, default=1, help="Value of k for pass@k calculation")
     parser.add_argument("--temperature", default=0, type=float)
-    parser.add_argument("--max_tokens", default=32768, type=int)
+    parser.add_argument("--max_tokens", default=3000, type=int)
     parser.add_argument("--top_p", default=1, type=float)
     # prompt
     parser.add_argument("--prompt_type", default="qwen-instruct", type=str)
@@ -110,17 +110,19 @@ def infer(args):
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, cache_dir=args.model_cache_dir)
     model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path,
                                                  cache_dir=args.model_cache_dir,
-                                                 device_map='auto',
+                                                 device_map='balanced_low_0',
                                                  torch_dtype='auto',
                                                  output_attentions=True)
 
     # load benchmark data
+    print(f"Loading data: {args.data_name} {args.split}")
     examples = load_data(args.data_name, args.split, args.data_dir)
     if args.end_idx == -1:
         args.end_idx = len(examples)
     examples = examples[args.start_idx:args.end_idx]
 
     # Main Loop
+    print(f"Start inference: {args.data_name} {args.split}")
     system_prompt, few_shot_prompt, question_format = get_three_prompt(args.prompt_type, args.data_name)
     for example in tqdm(examples, total=len(examples)):
         # skip if the example has been processed
@@ -147,7 +149,7 @@ def infer(args):
             cur_prompt = get_conversation_prompt_by_messages(tokenizer=tokenizer, messages=messages)
 
         with torch.no_grad():
-            inputs = tokenizer([cur_prompt], return_tensors="pt").to(model.device)
+            inputs = tokenizer([cur_prompt], return_tensors="pt").to('cuda:0')  # 数据加载到第一块GPU
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=args.max_tokens,
@@ -167,6 +169,7 @@ def infer(args):
             is_correct = check_is_correct(generated_answer, gt_ans)
 
         # save to file
+        print(f"Save example ID: {example_id}")
         example["generated_response"] = responses
         example["generated_answer"] = generated_answer
         example["is_correct"] = is_correct
@@ -174,12 +177,24 @@ def infer(args):
             json.dump(example, f, ensure_ascii=False)
             f.write("\n")
 
-        torch.save([step[-1].float().cpu() for step in outputs.attentions], output_attention_path)
+        saved_attention = [step[-1].float().cpu() for step in outputs.attentions]
+        saved_generated_ids = [i.cpu() for i in generated_ids]
+        saved_generated_tokens = [tokenizer.convert_ids_to_tokens(i) for i in saved_generated_ids]
+
+
+        torch.save({
+            'input_ids': inputs.input_ids.cpu(),
+            "generated_ids": saved_generated_ids,
+            'input_tokens': tokenizer.convert_ids_to_tokens(inputs.input_ids[0]),  # 仅用于debug
+            "generated_tokens": saved_generated_tokens,
+            "attentions": saved_attention,
+        }, output_attention_path)
         # torch.save([[att.float().cpu() for att in atts] for atts in outputs.attentions], output_attention_path)
         # torch.save([logits.float().cpu() for logits in outputs.logits], output_logits_path)
 
         # 回收显存
         del inputs, outputs, generated_ids, responses, generated_answer, is_correct
+        torch.cuda.empty_cache()
 
         # TODO： 计算pass@k
 
