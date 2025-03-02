@@ -41,7 +41,7 @@ def parse_args():
     parser.add_argument('--n_sampling', type=int, default=1, help="n for sampling")
     parser.add_argument("--k", type=int, default=1, help="Value of k for pass@k calculation")
     parser.add_argument("--temperature", default=0, type=float)
-    parser.add_argument("--max_tokens", default=3000, type=int)
+    parser.add_argument("--max_tokens", default=10000, type=int)
     parser.add_argument("--top_p", default=1, type=float)
     # prompt
     parser.add_argument("--prompt_type", default="qwen-instruct", type=str)
@@ -110,7 +110,7 @@ def infer(args):
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, cache_dir=args.model_cache_dir)
     model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path,
                                                  cache_dir=args.model_cache_dir,
-                                                 device_map='balanced_low_0',
+                                                 device_map='auto',
                                                  torch_dtype='auto',
                                                  output_attentions=True)
 
@@ -149,7 +149,7 @@ def infer(args):
             cur_prompt = get_conversation_prompt_by_messages(tokenizer=tokenizer, messages=messages)
 
         with torch.no_grad():
-            inputs = tokenizer([cur_prompt], return_tensors="pt").to('cuda:0')  # 数据加载到第一块GPU
+            inputs = tokenizer([cur_prompt], return_tensors="pt").to(model.device)  # 数据加载到第一块GPU
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=args.max_tokens,
@@ -177,7 +177,8 @@ def infer(args):
             json.dump(example, f, ensure_ascii=False)
             f.write("\n")
 
-        saved_attention = [step[-1].float().cpu() for step in outputs.attentions]
+        # saved_attention = [step[-1].float().cpu() for step in outputs.attentions]
+        saved_attention = [step.float().cpu() for step in outputs.attentions]  # 修改transformers路径下generation/utils 3026行
         saved_generated_ids = [i.cpu() for i in generated_ids]
         saved_generated_tokens = [tokenizer.convert_ids_to_tokens(i) for i in saved_generated_ids]
 
